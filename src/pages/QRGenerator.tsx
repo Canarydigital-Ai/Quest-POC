@@ -36,6 +36,7 @@ const QRGenerator: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [lastToken, setLastToken] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [emailSending, setEmailSending] = useState(false);
 
   const errors = useMemo(() => {
     const e: Partial<Record<keyof FormData, string>> = {};
@@ -68,7 +69,41 @@ const QRGenerator: React.FC = () => {
     setTouched({});
     setLastToken(null);
     setMessage(null);
+    setEmailSending(false);
   }, []);
+
+  // Function to send QR via email
+  const sendQREmail = async (token: string, payload: any) => {
+    try {
+      setEmailSending(true);
+      
+      const response = await fetch('http://localhost:3001/api/send-qr', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: data.name.trim(),
+          email: data.email.trim(),
+          token: token,
+          qrData: payload
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        setMessage("RSVP saved, QR generated, and email sent successfully! ✅");
+      } else {
+        setMessage("RSVP saved and QR generated, but email failed to send. ❌");
+      }
+    } catch (error) {
+      console.error('Email API error:', error);
+      setMessage("RSVP saved and QR generated, but email failed to send. ❌");
+    } finally {
+      setEmailSending(false);
+    }
+  };
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -90,24 +125,24 @@ const QRGenerator: React.FC = () => {
           name: data.name.trim(),
           email: data.email.trim(),
           phone: data.phone.trim(),
-          coming: data.confirmComing, // This will be false by default unless user checks the box
-          status: "invited", // invited | checked_in | cancelled
+          coming: data.confirmComing,
+          status: "invited",
           createdAt: serverTimestamp(),
         };
         await setDoc(doc(db, "rsvps", token), record);
 
-        // 3) Generate QR with compact payload (token is enough)
-        const payload = JSON.stringify({
+        // 3) Generate QR payload
+        const payload = {
           t: "rsvp",
           token,
-          // optional redundancy fields
           name: record.name,
           email: record.email,
           phone: record.phone,
-          coming: record.coming, // This reflects the default false or user's confirmation
-        });
+          coming: record.coming,
+        };
 
-        const url = await QRCode.toDataURL(payload, {
+        // 4) Generate QR for display
+        const url = await QRCode.toDataURL(JSON.stringify(payload), {
           width: 512,
           margin: 2,
           errorCorrectionLevel: "M",
@@ -115,7 +150,10 @@ const QRGenerator: React.FC = () => {
 
         setQrUrl(url);
         setLastToken(token);
-        setMessage("RSVP saved and QR generated.");
+        
+        // 5) Send QR via email
+        await sendQREmail(token, payload);
+
       } catch (err) {
         console.error(err);
         setMessage("Failed to generate QR. Please try again.");
@@ -211,10 +249,10 @@ const QRGenerator: React.FC = () => {
               <div className="flex items-center gap-3 pt-2">
                 <button
                   type="submit"
-                  disabled={isGenerating}
+                  disabled={isGenerating || emailSending}
                   className="inline-flex items-center gap-2 rounded-lg border border-white/15 bg-white/10 px-4 py-2 text-sm hover:bg-white/15 disabled:opacity-60"
                 >
-                  {isGenerating ? "Generating…" : "Generate QR"}
+                  {isGenerating ? "Generating…" : emailSending ? "Sending Email…" : "Generate QR & Send Email"}
                 </button>
                 <button
                   type="button"
@@ -226,7 +264,15 @@ const QRGenerator: React.FC = () => {
               </div>
 
               {message && (
-                <p className="pt-2 text-sm text-neutral-300">{message}</p>
+                <div className="pt-2">
+                  <p className={`text-sm ${
+                    message.includes('✅') ? 'text-green-400' : 
+                    message.includes('❌') ? 'text-yellow-400' : 
+                    'text-neutral-300'
+                  }`}>
+                    {message}
+                  </p>
+                </div>
               )}
             </form>
           </div>
@@ -244,7 +290,7 @@ const QRGenerator: React.FC = () => {
                   />
                 ) : (
                   <p className="px-6 text-sm text-neutral-400">
-                    Fill the form and click <span className="text-neutral-200">Generate QR</span>.
+                    Fill the form and click <span className="text-neutral-200">Generate QR & Send Email</span>.
                   </p>
                 )}
               </div>
@@ -259,12 +305,12 @@ const QRGenerator: React.FC = () => {
                     Download PNG
                   </a>
 
-                    <div className="mt-4 text-left text-xs text-neutral-300">
-                      <div className="mb-2 font-semibold text-neutral-200">Token</div>
-                      <div className="rounded-md border border-white/10 bg-neutral-950 p-3">
-                        <code className="break-all">{lastToken ?? "—"}</code>
-                      </div>
+                  <div className="mt-4 text-left text-xs text-neutral-300">
+                    <div className="mb-2 font-semibold text-neutral-200">Token</div>
+                    <div className="rounded-md border border-white/10 bg-neutral-950 p-3">
+                      <code className="break-all">{lastToken ?? "—"}</code>
                     </div>
+                  </div>
                 </>
               )}
 
@@ -278,19 +324,25 @@ const QRGenerator: React.FC = () => {
                       name: data.name || "<name>",
                       email: data.email || "<email>",
                       phone: data.phone || "<phone>",
-                    //   coming: data.confirmComing, // Shows current state (false by default)
+                      coming: data.confirmComing,
                     },
                     null,
                     2
                   )}
                 </pre>
               </div>
+              
+              {emailSending && (
+                <div className="mt-4 rounded-lg border border-blue-500/20 bg-blue-500/10 p-3">
+                  <p className="text-sm text-blue-400">📧 Sending QR code to email...</p>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         <p className="mt-8 text-center text-xs text-neutral-500">
-          Tip: The scanner decodes this JSON and marks attendance by token.
+          Tip: The QR code will be sent to your email and can be scanned for attendance.
         </p>
       </div>
     </div>
