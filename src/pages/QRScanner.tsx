@@ -1,23 +1,25 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { BrowserMultiFormatReader } from "@zxing/browser";
 import type { IScannerControls } from "@zxing/browser";
-import { doc, updateDoc, getDoc } from "firebase/firestore";
+import { doc, getDoc, updateDoc } from "firebase/firestore";
 import { db } from "../firebase/firebaseConfig";
+import SuccessModal from "../components/modal/SuccessModal"; 
+import ErrorModal from "../components/modal/ErrorModal"; 
 
-type Props = {
+interface QRScannerProps {
   onResult?: (text: string) => void;
   onError?: (err: unknown) => void;
   facingMode?: "user" | "environment";
   hint?: string;
   cooldownMs?: number; 
-};
+}
 
-const QRScanner: React.FC<Props> = ({
+const QRScanner: React.FC<QRScannerProps> = ({
   onResult,
   onError,
   facingMode = "environment",
   hint = "Point the camera at a QR code",
-  cooldownMs = 200, // Increased cooldown to prevent rapid scanning
+  cooldownMs = 200, 
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
@@ -26,13 +28,12 @@ const QRScanner: React.FC<Props> = ({
 
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("Idle");
-  const [lastScanResult, setLastScanResult] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [showErrorModal, setShowErrorModal] = useState(false);
+  const [successData, setSuccessData] = useState({ name: '', email: '', time: '' });
+  const [errorMessage, setErrorMessage] = useState('');
 
-  const welcomeMessage = 'Welcome to the QR scanner!';
-
-
-  // Function to handle check-in API call
   const handleCheckIn = useCallback(async (qrData: any) => {
     try {
       setIsProcessing(true);
@@ -43,7 +44,6 @@ const QRScanner: React.FC<Props> = ({
         throw new Error("Invalid QR code: No token found");
       }
 
-      // Get the current RSVP record
       const rsvpRef = doc(db, "rsvps", token);
       const rsvpSnap = await getDoc(rsvpRef);
       
@@ -53,24 +53,28 @@ const QRScanner: React.FC<Props> = ({
 
       const rsvpData = rsvpSnap.data();
       
-      // Check if already checked in
       if (rsvpData.status === "checked_in") {
-        setStatus(`${rsvpData.name} is already checked in!`);
+        setErrorMessage(`${rsvpData.name} is already checked in!`);
+        setShowErrorModal(true);
+        setTimeout(() => setShowErrorModal(false), 800);
         return;
       }
 
-      // Update the RSVP record with check-in status
       await updateDoc(rsvpRef, {
         coming: true,
         status: "checked_in",
         checkedInAt: new Date(),
-        checkedInBy: "scanner" // You can add user info here if needed
+        checkedInBy: "scanner"
       });
 
-      setStatus(`✅ ${rsvpData.name} checked in successfully!`);
-      setLastScanResult(`Welcome ${rsvpData.name}! Email: ${rsvpData.email}`);
+      const checkInTime = new Date().toLocaleString();
+      setSuccessData({
+        name: rsvpData.name,
+        email: rsvpData.email,
+        time: checkInTime
+      });
+      setShowSuccessModal(true);
 
-      // Optional: Call onResult if provided
       onResult?.(JSON.stringify({
         ...qrData,
         status: "checked_in",
@@ -79,19 +83,15 @@ const QRScanner: React.FC<Props> = ({
 
     } catch (error: any) {
       console.error("Check-in error:", error);
-      setStatus(`❌ Check-in failed: ${error.message}`);
+      setErrorMessage(error.message);
+      setShowErrorModal(true);
+      setTimeout(() => setShowErrorModal(false), 800);
       onError?.(error);
     } finally {
       setIsProcessing(false);
-      
-      // Reset status after 3 seconds
-      setTimeout(() => {
-        if (running) {
-          setStatus(hint);
-        }
-      }, 3000);
+      setStatus("Ready for next scan");
     }
-  }, [onResult, onError, hint, running]);
+  }, [onResult, onError]);
 
   const start = useCallback(async () => {
     try {
@@ -101,7 +101,6 @@ const QRScanner: React.FC<Props> = ({
         readerRef.current = new BrowserMultiFormatReader();
       }
 
-      // Stop any previous session
       controlsRef.current?.stop();
       controlsRef.current = null;
 
@@ -116,32 +115,37 @@ const QRScanner: React.FC<Props> = ({
           audio: false,
         },
         video,
-        (result, err) => {
+        (result) => {
           if (result && !isProcessing) {
             const now = Date.now();
-            if (now < nextAllowedRef.current) return; // ignore duplicates during cooldown
+            if (now < nextAllowedRef.current) return;
             nextAllowedRef.current = now + cooldownMs;
 
             const text = result.getText();
             
             try {
-              // Try to parse the QR code as JSON
               const qrData = JSON.parse(text);
               
-              // Check if it's an RSVP QR code
               if (qrData.t === "rsvp" && qrData.token) {
                 handleCheckIn(qrData);
               } else {
-                setStatus("❌ Invalid RSVP QR code");
+                setErrorMessage("Invalid RSVP QR code format");
+                setShowErrorModal(true);
                 onResult?.(text);
               }
             } catch (parseError) {
-              // If not JSON, treat as regular text
-              setStatus("❌ Not an RSVP QR code");
-              onResult?.(text);
+              if (text.includes('demo-valid')) {
+                handleCheckIn({ t: "rsvp", token: "valid" });
+              } else if (text.includes('demo-invalid')) {
+                handleCheckIn({ t: "rsvp", token: "invalid" });
+              } else if (text.includes('demo-checked')) {
+                handleCheckIn({ t: "rsvp", token: "checked-in" });
+              } else {
+                setErrorMessage("Not a valid RSVP QR code");
+                setShowErrorModal(true);
+                onResult?.(text);
+              }
             }
-          } else if (err) {
-            // Transient decode errors are expected while scanning; ignore
           }
         }
       );
@@ -151,11 +155,11 @@ const QRScanner: React.FC<Props> = ({
     } catch (e: any) {
       setRunning(false);
       if (e?.name === "NotAllowedError") {
-        setStatus("Camera permission denied. Allow camera access and retry.");
+        setStatus("Camera permission denied. Please allow camera access and retry.");
       } else if (e?.name === "NotFoundError") {
-        setStatus("No camera found. Connect a webcam or try another device.");
+        setStatus("No camera found. Please connect a webcam or try another device.");
       } else if (e?.name === "SecurityError") {
-        setStatus("Use HTTPS or http://localhost in development.");
+        setStatus("Please use HTTPS or http://localhost for development.");
       } else {
         setStatus("Unable to start camera.");
       }
@@ -167,119 +171,147 @@ const QRScanner: React.FC<Props> = ({
     controlsRef.current?.stop();
     controlsRef.current = null;
     setRunning(false);
-    setStatus("Stopped");
-    setLastScanResult(null);
+    setStatus("Camera stopped");
   }, []);
 
   useEffect(() => {
-    setStatus("Tap Start to open camera.");
+    setStatus("Ready to scan - Tap Start to begin");
     return () => controlsRef.current?.stop();
   }, []);
 
   return (
-    <div className="flex h-screen flex-col items-center justify-center bg-neutral-950 p-4">
-      {/* Header */}
-      <div className="mb-4 text-center">
-        <h1 className="text-2xl font-semibold text-white mb-2">Event Check-in Scanner</h1>
-        <a
-          href="/generate" // or your generator route
-          className="text-sm text-neutral-400 hover:text-white"
-        >
-          ← Back to Generator
-        </a>
-      </div>
-
-      <div className="relative w-full max-w-xl overflow-hidden rounded-xl border border-white/10 bg-black">
-        {/* 16:9 video area */}
-        <div className="relative aspect-[16/9]">
-          <video
-            ref={videoRef}
-            muted
-            autoPlay
-            playsInline
-            className="h-full w-full object-cover"
-          />
-          
-          {/* Scan overlay with animation */}
-          <div className="pointer-events-none absolute inset-0">
-            <div className="absolute inset-4 border-2 border-white/30 rounded-lg">
-              {/* Scanning line animation */}
-              {running && !isProcessing && (
-                <div className="absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-transparent via-green-400 to-transparent animate-pulse" />
-              )}
-            </div>
+    <>
+      <div className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-4">
+        <div className="mb-8 text-center">
+          <div className="mb-4 inline-flex items-center justify-center rounded-full bg-white/10 p-3 backdrop-blur-sm">
+            <svg className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+            </svg>
           </div>
-          
-          {/* Processing overlay */}
-          {isProcessing && (
-            <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-              <div className="text-center text-white">
-                <div className="w-8 h-8 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                <p className="text-sm">Processing...</p>
-              </div>
-            </div>
-          )}
+          <h1 className="text-3xl font-bold text-white mb-2 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text">
+            Event Check-in Scanner
+          </h1>
+          <p className="text-gray-300">Scan QR codes for instant guest check-in</p>
+        </div>
 
-          {/* Footer controls/status */}
-          <div className="absolute inset-x-3 bottom-3">
-            <div className="bg-black/80 rounded-lg p-3 backdrop-blur-sm">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <span className="text-xs text-white/90 flex-1">{status}</span>
-                <div className="flex gap-2">
-                  {!running ? (
-                    <button
-                      onClick={start}
-                      disabled={isProcessing}
-                      className="rounded-lg border border-white/15 bg-neutral-900 px-3 py-2 text-sm text-white hover:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-white/20 disabled:opacity-50"
-                    >
-                      Start
-                    </button>
-                  ) : (
-                    <button
-                      onClick={stop}
-                      disabled={isProcessing}
-                      className="rounded-lg border border-red-400/30 bg-red-900/40 px-3 py-2 text-sm text-white hover:bg-red-900/60 focus:outline-none focus:ring-2 focus:ring-red-400/40 disabled:opacity-50"
-                    >
-                      Stop
-                    </button>
+        <div className="relative w-full max-w-6xl bg-red-900 ">
+          <div className="overflow-hidden rounded-3xl border border-white/20 bg-black/40 backdrop-blur-sm shadow-2xl">
+            <div className="relative aspect-[16/9]">
+              <video
+                ref={videoRef}
+                muted
+                autoPlay
+                playsInline
+                className="h-full w-full object-cover"
+              />
+              
+              {/* Scan Overlay */}
+              <div className="pointer-events-none absolute inset-0">
+                <div className="absolute inset-0 bg-black/30"></div>
+                
+                <div className="absolute left-1/2 top-1/2 w-64 h-64 transform -translate-x-1/2 -translate-y-1/2">
+                  <div className="absolute inset-0 bg-transparent border-2 border-green-400 rounded-2xl shadow-2xl shadow-green-400/20"></div>
+                  
+                  {/* Corner crosshairs */}
+                  <div className="absolute -top-2 -left-2">
+                    <div className="w-8 h-2 bg-green-400 rounded-full"></div>
+                    <div className="w-2 h-8 bg-green-400 rounded-full"></div>
+                  </div>
+                  <div className="absolute -top-2 -right-2">
+                    <div className="w-8 h-2 bg-green-400 rounded-full ml-auto"></div>
+                    <div className="w-2 h-8 bg-green-400 rounded-full ml-auto"></div>
+                  </div>
+                  <div className="absolute -bottom-2 -left-2">
+                    <div className="w-2 h-8 bg-green-400 rounded-full"></div>
+                    <div className="w-8 h-2 bg-green-400 rounded-full"></div>
+                  </div>
+                  <div className="absolute -bottom-2 -right-2">
+                    <div className="w-2 h-8 bg-green-400 rounded-full ml-auto"></div>
+                    <div className="w-8 h-2 bg-green-400 rounded-full ml-auto"></div>
+                  </div>
+                  
+                  {/* Center crosshair */}
+                  <div className="absolute left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2">
+                    <div className="w-6 h-0.5 bg-green-400 absolute left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2"></div>
+                    <div className="w-0.5 h-6 bg-green-400 absolute left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2"></div>
+                  </div>
+                  
+                  {/* Scanning Animation */}
+                  {running && !isProcessing && (
+                    <>
+                      <div className="absolute inset-x-0 top-1/2 h-0.5 bg-gradient-to-r from-transparent via-green-400 to-transparent animate-pulse transform -translate-y-1/2"></div>
+                      <div className="absolute left-1/2 inset-y-0 w-0.5 bg-gradient-to-b from-transparent via-green-400 to-transparent animate-pulse transform -translate-x-1/2"></div>
+                    </>
                   )}
+                  
+                  <div className="absolute -bottom-12 left-1/2 transform -translate-x-1/2 text-center">
+                    <p className="text-sm text-green-400 font-medium bg-black/60 px-3 py-1 rounded-full backdrop-blur-sm">
+                      Position QR code here
+                    </p>
+                  </div>
                 </div>
               </div>
               
-              {/* Last scan result */}
-              {lastScanResult && (
-                <div className="text-xs text-green-400 mt-2 p-2 bg-green-900/20 rounded border border-green-500/30">
-                  {lastScanResult}
+              {/* Processing Overlay */}
+              {isProcessing && (
+                <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-sm">
+                  <div className="text-center text-white">
+                    <div className="w-12 h-12 border-4 border-white border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                    <p className="text-lg font-medium">Processing check-in...</p>
+                    <p className="text-sm text-gray-300">Please wait</p>
+                  </div>
                 </div>
               )}
+
+              {/* Controls */}
+              <div className="absolute inset-x-4 bottom-4">
+                <div className="bg-black/80 rounded-2xl p-4 backdrop-blur-sm border border-white/10">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex-1">
+                      <p className="text-xs font-medium text-gray-400 mb-1">Status</p>
+                      <p className="text-sm text-white">{status}</p>
+                    </div>
+                    <div className="flex gap-3">
+                      {!running ? (
+                        <button
+                          onClick={start}
+                          disabled={isProcessing}
+                          className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-500 to-purple-500 px-6 py-3 font-semibold text-white shadow-lg hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Start Scanning
+                        </button>
+                      ) : (
+                        <button
+                          onClick={stop}
+                          disabled={isProcessing}
+                          className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-red-500 to-pink-500 px-6 py-3 font-semibold text-white shadow-lg hover:from-red-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Stop
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Welcome Message - Outside Camera Area */}
-      {welcomeMessage && (
-        <div className="mt-4 p-4 bg-green-900/20 border border-green-500/30 rounded-lg text-center max-w-md mx-auto">
-          <p className="text-green-400 font-medium">{welcomeMessage}</p>
-        </div>
-      )}
+      <SuccessModal 
+        isOpen={showSuccessModal}
+        onClose={() => setShowSuccessModal(false)}
+        guestName={successData.name}
+        guestEmail={successData.email}
+        checkInTime={successData.time}
+      />
 
-      {/* Last Scan Result - Outside Camera Area */}
-      {lastScanResult && (
-        <div className="mt-2 p-3 bg-neutral-800 border border-neutral-600 rounded-lg text-center max-w-md mx-auto">
-          <p className="text-neutral-300 text-sm">{lastScanResult}</p>
-        </div>
-      )}
-
-      <div className="mt-4 text-center max-w-md">
-        <p className="text-xs text-neutral-500">
-          Scan RSVP QR codes to automatically check in guests.
-        </p>
-        <p className="text-xs text-neutral-600 mt-1">
-          Use <b>HTTPS</b> (or <code>http://localhost</code>) and allow camera permissions.
-        </p>
-      </div>
-    </div>
+      <ErrorModal 
+        isOpen={showErrorModal}
+        onClose={() => setShowErrorModal(false)}
+        errorMessage={errorMessage}
+      />
+    </>
   );
 };
 
